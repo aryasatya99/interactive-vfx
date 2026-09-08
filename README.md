@@ -47,6 +47,12 @@ index fingers directly control scale and position.
   distance/midpoint drives scale and position
 - ACTIVE / STANDBY system state — via SPACE or a debounced (600ms)
   OPEN_HAND / CLOSED_HAND gesture, resistant to accidental false triggers
+- Automatic hand-presence fade: the VFX eases in the moment a hand appears
+  and eases back out ~400ms after both hands leave frame — the camera keeps
+  running throughout
+- Four switchable visual modes (NORMAL, FROSTED BLUR, VFX FOCUS, GLOW/DREAM)
+  with smooth 300-450ms transitions between them — see
+  [Visual modes](#visual-modes) below
 - Minimal on-screen indicators only — no dashboard, no panels covering the visual
 - 100% local processing — no cloud, no external API, no telemetry
 
@@ -61,11 +67,14 @@ src/
 │                          StableValue - the generic "hold for N ms" debounce primitive
 ├── finger_tracker.py      stateful per-hand smoothing built on StableValue
 ├── interaction.py         GESTURE_CONFIG mapping, EMA smoothing, two-hand override,
-│                          ActivationController (debounced gesture on/off)
+│                          ActivationController (debounced gesture on/off),
+│                          PresenceFader (hand-presence auto fade)
 ├── jellyfish.py           procedural glowing jellyfish (bell + tentacles)
 ├── wireframe_cube.py      rotating 3D cube, manual rotation + perspective projection
 ├── particles.py           capped, lifetime-based particle system
-├── visual_engine.py       composites cube + jellyfish + particles + glow each frame
+├── visual_mode.py         VISUAL_MODES config, ModeController (transitions),
+│                          GestureModeSwitcher, frosted-glass background treatment
+├── visual_engine.py       composites background + cube + jellyfish + particles + glow
 └── utils.py               FPS counter, text drawing, EMA/clamp math, glow compositing
 ```
 
@@ -83,10 +92,50 @@ Finger Detection (0-5 open fingers per hand, thumb/index/middle/ring/pinky)
 finger_tracker.py (debounce ~300-500ms against jitter)
   |
 interaction.py (GESTURE_CONFIG -> position / scale / particles / animation,
-  |               EMA smoothing, two-hand distance/midpoint override)
+  |               EMA smoothing, two-hand distance/midpoint override,
+  |               PresenceFader -> hand-presence fade alpha)
   |
-visual_engine.py (jellyfish + wireframe cube + particles, glow composite)
+visual_mode.py (ModeController -> interpolated blur/brightness/contrast/
+  |              vfx_scale/particle/glow parameters for the active mode)
+  |
+visual_engine.py (background treatment -> wireframe cube -> jellyfish ->
+                   particles -> glow composite)
 ```
+
+## Visual modes
+
+Press `M` to cycle forward, `SHIFT+M` to cycle back. Switching always
+interpolates smoothly (300-450ms depending on the mode) instead of popping.
+
+| Mode | Feel |
+|---|---|
+| **NORMAL** | Sharp camera, normal brightness/contrast, VFX active when hands are tracked |
+| **FROSTED BLUR** | Soft, translucent "frosted glass" background — camera stays clearly visible, just softened and gently dimmed; VFX stays sharp on top |
+| **VFX FOCUS** | Background pushed further back (more blur/dim), jellyfish/cube/particles enlarged and brightened so they read as the clear subject |
+| **GLOW/DREAM** | Experimental — stronger glow and more luminous particles, background softly lit rather than flat black |
+
+All parameters live in `VISUAL_MODES` in `src/visual_mode.py`:
+
+```python
+VISUAL_MODES = {
+    "normal":       {"blur_strength": 0.0, "blur_alpha": 0.0, ...},
+    "frosted_blur": {"blur_strength": 0.35, "blur_alpha": 0.55, ...},
+    "vfx_focus":    {"blur_strength": 0.5, "blur_alpha": 0.75, ...},
+    "glow_dream":   {"blur_strength": 0.4, "blur_alpha": 0.6, ...},
+}
+```
+
+Each mode sets `blur_strength`, `blur_alpha` (how much of the blurred layer
+is blended back over the sharp camera — this is what keeps frosted blur from
+ever becoming an opaque grey screen), `brightness`, `contrast`, `vfx_scale`,
+`particle_intensity`, `glow_intensity`, and `transition_speed` (ms). Add a
+new mode by adding one more dict entry and its name to `MODE_ORDER` —
+`visual_engine.py` never needs to change.
+
+Frosted blur is deliberately cheap: it downsamples the camera frame to 1/4
+resolution before Gaussian-blurring it, then scales back up, which both
+keeps it real-time and gives an extra soft, glassy quality a single
+full-resolution blur pass wouldn't have.
 
 Finger extension uses a simple, orientation-independent rule: a finger is
 "open" when its tip sits farther from the wrist than its middle joint does.
@@ -120,7 +169,7 @@ Pinned to a combination verified to install without conflicts **and** run
 correctly on macOS + Apple Silicon + Python 3.12:
 
 ```text
-opencv-python==4.10.0.84
+opencv-contrib-python==4.10.0.84
 mediapipe==0.10.21
 numpy==1.26.4
 ```
@@ -129,6 +178,14 @@ numpy==1.26.4
 upgrade MediaPipe past this pin without re-testing: a newer release (1.0.1,
 at time of writing) crashes on macOS with a Metal/GPU-related `Service is
 unavailable` error regardless of CPU delegate settings.
+
+`opencv-contrib-python` (not `opencv-python`) is used deliberately: mediapipe
+declares `opencv-contrib-python` as its own dependency, and installing
+`opencv-python` as well makes pip write two different packages' files into
+the same `cv2/` directory — OpenCV upstream explicitly warns against
+installing both together, since whichever installs last silently wins.
+`opencv-contrib-python` is a superset of `opencv-python`'s API, so pinning
+only it avoids the collision without changing any `cv2` call in this codebase.
 
 Verify after installing:
 
@@ -177,6 +234,7 @@ GESTURE_CONFIG = {
 | ✊ Closed fist, held ~600ms | Pauses the system (same as SPACE) |
 | 🤏 Pinch (thumb touches index) | Detected as a modifier flag alongside the finger count |
 | 🙌 Two hands | Overrides single-hand position/scale: the midpoint and distance between both index fingers control the visual directly, plus draws a connecting line |
+| 🤏🤏 Both hands PINCHing, held ~650ms | Advances to the next visual mode (same as `M`) |
 
 Reassign any of these by editing the dict — nothing else needs to change.
 The finger-count-to-gesture-name mapping itself is separate
@@ -193,13 +251,18 @@ depth estimation.
 ## Keyboard controls
 
 ```text
-SPACE  = toggle ACTIVE / STANDBY
-ESC/Q  = quit
+SPACE      = toggle ACTIVE / STANDBY
+M          = next visual mode
+SHIFT + M  = previous visual mode
+ESC/Q      = quit
 ```
 
 In `STANDBY`, the camera and hand tracking keep running exactly as before,
 but the jellyfish/cube render dimmed and small, and no new particles are
-emitted — switch back with SPACE or an open-hand gesture.
+emitted — switch back with SPACE or an open-hand gesture. Independently of
+STANDBY, whenever the system is `ACTIVE` the VFX also auto-fades out ~400ms
+after no hand has been seen (and fades back in the moment one reappears) —
+this is the `PresenceFader` described in [Architecture](#architecture).
 
 ## Camera permissions
 
@@ -229,7 +292,13 @@ Target is 30-60 FPS. To stay there:
 - Particles are hard-capped at `MAX_PARTICLES = 500`, regardless of
   emission rate.
 - "Glow" is faked with a cheap `cv2.add` composite instead of a full-frame
-  Gaussian blur pass.
+  Gaussian blur pass, and frosted-blur mode blurs a downsampled (1/4
+  resolution) copy of the frame rather than the full-resolution image.
+- Measured render-only cost (background treatment + cube + jellyfish +
+  particles, excluding MediaPipe inference) on Apple Silicon: ~1.6ms/frame
+  in NORMAL mode, ~2.6-2.8ms/frame in the blur-based modes — all four modes
+  stay well under a 16ms (60 FPS) budget on their own. In practice, MediaPipe
+  hand detection (CPU delegate) is the actual bottleneck, not rendering.
 - No frame is ever buffered, queued, or saved — every frame is processed and
   discarded immediately, so memory use stays flat over an arbitrarily long
   run.
@@ -277,6 +346,7 @@ interactive-vfx/
 │   ├── gesture_detector.py
 │   ├── finger_tracker.py
 │   ├── visual_engine.py
+│   ├── visual_mode.py
 │   ├── jellyfish.py
 │   ├── particles.py
 │   ├── wireframe_cube.py
@@ -285,7 +355,8 @@ interactive-vfx/
 └── tests/
     ├── __init__.py
     ├── test_detector.py
-    └── test_gestures.py
+    ├── test_gestures.py
+    └── test_visual_mode.py
 ```
 
 ## Roadmap

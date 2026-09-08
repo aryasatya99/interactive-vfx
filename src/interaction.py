@@ -221,3 +221,31 @@ class ActivationController:
         if pause_stable:
             return False
         return None
+
+
+class PresenceFader:
+    """Turns "is at least one hand currently detected" into a smooth 0..1
+    fade, used to auto fade the VFX in when a hand appears and fade it back
+    out (instead of popping off) shortly after both hands leave the frame.
+
+    A short grace period (default 400ms) means a single dropped-detection
+    frame doesn't cause a visible flicker - the fade-out only starts once no
+    hand has been seen for the full grace period, then eases toward 0 over
+    `fade_ms`, independent of the SPACE/gesture ACTIVE-STANDBY toggle."""
+
+    def __init__(self, grace_ms: float = 400, fade_ms: float = 400) -> None:
+        self.grace_ms = grace_ms
+        self.fade_ms = fade_ms
+        self.alpha = 0.0
+        self._last_seen_ms = -1e9
+
+    def update(self, hand_present: bool, dt: float, now_ms: float) -> float:
+        if hand_present:
+            self._last_seen_ms = now_ms
+        target = 1.0 if (now_ms - self._last_seen_ms) <= self.grace_ms else 0.0
+        # Exponential approach toward target; speed derived from fade_ms so
+        # it takes roughly fade_ms to cross most of the gap, regardless of
+        # frame rate (dt-scaled, not a fixed per-frame step).
+        speed = 1.0 / max(0.05, self.fade_ms / 1000.0)
+        self.alpha = clamp(self.alpha + (target - self.alpha) * clamp(dt * speed, 0.0, 1.0), 0.0, 1.0)
+        return self.alpha
