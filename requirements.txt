@@ -4,7 +4,17 @@
 # writing) crashes on macOS with "Service is unavailable" inside a Metal/GPU
 # calculator regardless of CPU delegate settings — 0.10.21 is the newest
 # version confirmed stable here, and it requires numpy<2.
-opencv-python==4.10.0.84
+#
+# opencv-contrib-python (not opencv-python) is used deliberately: mediapipe
+# declares opencv-contrib-python as its own dependency, and installing
+# opencv-python *as well* makes pip put two different packages' files into
+# the same `cv2/` directory — OpenCV upstream explicitly warns never to
+# install both. Whichever installs last silently wins, so `cv2.__version__`
+# becomes install-order-dependent instead of matching what's pinned here.
+# opencv-contrib-python is a superset of opencv-python (same cv2 API plus
+# extras this project doesn't use), so pinning only it avoids the collision
+# entirely while keeping every cv2 call in this codebase working unchanged.
+opencv-contrib-python==4.10.0.84
 mediapipe==0.10.21
 numpy==1.26.4
 
