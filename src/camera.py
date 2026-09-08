@@ -31,12 +31,16 @@ class Camera:
         self._cap = cv2.VideoCapture(index, backend)
         if not self._cap.isOpened():
             raise CameraError(
-                "Camera permission required. Enable camera access for VS Code "
-                "in System Settings > Privacy & Security > Camera.\n"
+                "Camera access is disabled.\n"
+                "Enable camera permission for the application/VS Code in:\n"
+                "  System Settings -> Privacy & Security -> Camera\n"
                 f"(Tried camera index {index}. If permission is already "
                 "granted, another app may be holding the camera, or try "
                 "--camera 1 for a different device.)"
             )
+        # Requested resolution is a target, not a guarantee: cv2 silently
+        # falls back to the closest mode the device actually supports, so
+        # `resolution` below may differ from (width, height) on some cameras.
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -69,7 +73,7 @@ class Camera:
         if not ok or frame is None:
             self._failures += 1
             if self._failures > 30:
-                raise CameraError("Kamera berhenti mengirim frame (30x gagal berturut).")
+                raise CameraError("Camera stopped delivering frames (30 consecutive failures).")
             return None
         self._failures = 0
         return cv2.flip(frame, 1)

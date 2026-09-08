@@ -1,26 +1,21 @@
-"""Small shared helpers: FPS counter, drawing, and non-overwriting capture save."""
+"""Small shared helpers: FPS counter, text drawing, smoothing math, and glow
+compositing used by the visual modules (jellyfish, cube, particles)."""
 
 from __future__ import annotations
 
 import time
 from collections import deque
-from datetime import datetime
-from pathlib import Path
 
 import cv2
 import numpy as np
 
-# --- Palette (BGR) ----------------------------------------------------------
-COLOR_BG = (24, 22, 20)
-COLOR_PANEL = (38, 35, 32)
-COLOR_TEXT = (235, 235, 235)
-COLOR_MUTED = (150, 148, 145)
-COLOR_OK = (120, 220, 120)
-COLOR_WARN = (60, 190, 255)
-COLOR_BAD = (90, 90, 240)
-COLOR_ACCENT = (255, 190, 90)
-
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+# --- Palette (BGR) - neon cyan/blue, used sparingly for minimal indicators --
+COLOR_TEXT = (235, 235, 235)
+COLOR_MUTED = (160, 158, 155)
+COLOR_OK = (120, 255, 170)
+COLOR_WARN = (60, 190, 255)
 
 
 class FPSCounter:
@@ -48,35 +43,34 @@ def text_width(text: str, scale: float = 0.5, thickness: int = 1) -> int:
     return cv2.getTextSize(text, FONT, scale, thickness)[0][0]
 
 
-def fit_into(image: np.ndarray | None, width: int, height: int) -> np.ndarray:
-    """Resize keeping aspect ratio and letterbox onto a panel-coloured canvas."""
-    canvas = np.full((height, width, 3), COLOR_PANEL, dtype=np.uint8)
-    if image is None or image.size == 0:
-        return canvas
-    if image.ndim == 2:
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    h, w = image.shape[:2]
-    scale = min(width / w, height / h)
-    new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
-    interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
-    resized = cv2.resize(image, (new_w, new_h), interpolation=interp)
-    x0, y0 = (width - new_w) // 2, (height - new_h) // 2
-    canvas[y0:y0 + new_h, x0:x0 + new_w] = resized
-    return canvas
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
 
 
-def save_capture(frame: np.ndarray, out_dir: Path) -> Path:
-    """Save `frame` as captures/capture_YYYYMMDD_HHMMSS.jpg.
+def ema(previous: float, target: float, alpha: float) -> float:
+    """Exponential moving average: alpha closer to 1 tracks the target
+    faster, closer to 0 smooths harder. Used everywhere a tracked position
+    or size must not jitter frame-to-frame."""
+    return previous + (target - previous) * alpha
 
-    Never overwrites: if a file for this exact second already exists (e.g.
-    SPACE pressed twice within the same second), a numeric suffix is added.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = out_dir / f"capture_{stamp}.jpg"
-    n = 2
-    while path.exists():
-        path = out_dir / f"capture_{stamp}_{n}.jpg"
-        n += 1
-    cv2.imwrite(str(path), frame)
-    return path
+
+def ema_point(previous: tuple[float, float], target: tuple[float, float],
+              alpha: float) -> tuple[float, float]:
+    return (ema(previous[0], target[0], alpha), ema(previous[1], target[1], alpha))
+
+
+# --- Cheap glow compositing --------------------------------------------------
+# Instead of Gaussian-blurring the whole frame every frame (expensive), glow
+# is faked by drawing shapes onto a throwaway black layer with extra
+# thickness/radius, then adding that layer onto the real frame with
+# `cv2.add`, which saturates at 255 instead of wrapping - overlaps simply
+# brighten instead of corrupting colour. One `cv2.add` per frame is far
+# cheaper than a real blur pass and reads as "glow" at video framerate.
+
+def new_glow_layer(frame: np.ndarray) -> np.ndarray:
+    return np.zeros_like(frame)
+
+
+def blend_glow(frame: np.ndarray, glow: np.ndarray, intensity: float = 0.9) -> np.ndarray:
+    scaled = cv2.convertScaleAbs(glow, alpha=intensity, beta=0)
+    return cv2.add(frame, scaled)

@@ -1,39 +1,97 @@
-# AURA — AI Gesture Interface
+# Interactive VFX
 
-A futuristic, HUD-style gesture-control demo for the Mac webcam. Raise both
-hands with thumb and index open on each, and AURA's visual effects come
-alive — scanning ring brightens, particles bloom from your fingertips, and
-the interface flashes `GESTURE ACCEPTED`.
+Interactive real-time visual system controlled by hand gestures. Your Mac's
+webcam feed becomes the canvas for a glowing, procedural jellyfish inside a
+rotating 3D wireframe cube, both driven live by your hands — no mouse, no
+keyboard, no controller.
 
-Built with OpenCV, MediaPipe, and NumPy. All processing runs locally — no
-cloud, no paid API, no external assets.
+```text
+WEBCAM -> HAND TRACKING -> FINGER/GESTURE DATA -> REAL-TIME VISUAL CONTROL -> 3D INTERACTIVE VFX
+```
+
+This is a hand-controlled visual instrument, not a dashboard: the camera is
+the background, the VFX is the experience, and on-screen text is kept to a
+handful of small, corner-anchored numbers.
 
 ## Overview
 
-AURA reads your Mac's camera, tracks up to two hands with MediaPipe's
-HandLandmarker, and validates a strict two-hand gesture (thumb + index open
-on **both** the left and right hand, judged by MediaPipe's own handedness
-classifier — never by detection order or screen position). A short debounce
-window keeps the gesture status from flickering on momentary landmark noise.
-Everything is drawn as a sci-fi HUD directly over the camera feed: corner
-brackets, a scanning ring, glowing fingertips, and lightweight particles.
+MediaPipe tracks up to two hands and reports true left/right handedness for
+each. For every hand, this app counts how many fingers are extended (0-5),
+classifies that into a named gesture, and smooths it over ~300-500ms so
+natural landmark jitter doesn't make the gesture flicker. A configurable
+mapping (`GESTURE_CONFIG`) turns each hand's stable gesture into a control
+channel — position, scale, particle intensity, or animation intensity —
+which an exponential-smoothing interaction layer turns into calm, jitter-free
+motion for the jellyfish, the cube, and a capped particle system. Two hands
+together unlock a second mode: the distance and midpoint between your two
+index fingers directly control scale and position.
 
 ## Features
 
-- Realtime Mac camera capture (mirrored, like a normal camera app)
-- MediaPipe HandLandmarker hand tracking, up to 2 hands
-- True LEFT/RIGHT detection from MediaPipe handedness (not detection order)
-- Per-hand thumb + index "open" recognition
-- Strict two-hand gesture validation, not just "2 hands present"
-- 400ms debounce so the gesture status doesn't flicker
-- Futuristic HUD: title, corner brackets, scanning ring, crosshairs, glowing
-  fingertips, semi-transparent status panels
-- Lightweight, capped particle effect that follows fingertip positions
-- ACTIVE / STANDBY system state (tracking always runs; the main visual
-  effect only fires in ACTIVE)
-- FPS counter and detected-hand count
-- 100% local processing — nothing ever leaves your machine, no internet
-  needed while running
+- Realtime Mac camera capture, mirrored like a normal camera app
+- MediaPipe HandLandmarker tracking, up to 2 hands, true LEFT/RIGHT from
+  MediaPipe's own handedness classifier (never assumed from detection order)
+- Stable 0-5 finger counting per hand, debounced (~300-500ms) against jitter
+- A configurable gesture system (`GESTURE_CONFIG`) — CLOSED_HAND, ONE..FOUR
+  fingers, OPEN_HAND, and PINCH — mapped to visual control channels
+- Index-finger position control with exponential smoothing (no jitter)
+- Thumb<->index pinch distance as a live scale controller, normalized by the
+  hand's own size so it works at any distance from the camera
+- Relative hand-size depth estimate (bigger hand on screen = "closer") that
+  modulates visual size, glow, and particle count
+- A procedurally generated, real-time glowing jellyfish (translucent bell,
+  independently swaying tentacles) — no static image or asset involved
+- A rotating 3D wireframe cube with glowing edges, scaling with gesture input
+- A lightweight, capped (500) particle system with trails and fade-out
+- Two-hand interaction: a connection line between both index fingers, whose
+  distance/midpoint drives scale and position
+- ACTIVE / STANDBY system state — via SPACE or a debounced (600ms)
+  OPEN_HAND / CLOSED_HAND gesture, resistant to accidental false triggers
+- Minimal on-screen indicators only — no dashboard, no panels covering the visual
+- 100% local processing — no cloud, no external API, no telemetry
+
+## Architecture
+
+```text
+main.py                  application loop, input handling, state, rendering pipeline
+src/
+├── camera.py             camera init, mirrored frame capture, cleanup, error handling
+├── hand_detector.py       MediaPipe HandLandmarker wrapper, raw per-frame hand geometry
+├── gesture_detector.py    pure gesture classification (finger count -> name), pinch test,
+│                          StableValue - the generic "hold for N ms" debounce primitive
+├── finger_tracker.py      stateful per-hand smoothing built on StableValue
+├── interaction.py         GESTURE_CONFIG mapping, EMA smoothing, two-hand override,
+│                          ActivationController (debounced gesture on/off)
+├── jellyfish.py           procedural glowing jellyfish (bell + tentacles)
+├── wireframe_cube.py      rotating 3D cube, manual rotation + perspective projection
+├── particles.py           capped, lifetime-based particle system
+├── visual_engine.py       composites cube + jellyfish + particles + glow each frame
+└── utils.py               FPS counter, text drawing, EMA/clamp math, glow compositing
+```
+
+```text
+Camera
+  |
+OpenCV (mirrored frame capture)
+  |
+MediaPipe HandLandmarker
+  |
+Handedness Detection (Left / Right, from MediaPipe - never assumed order)
+  |
+Finger Detection (0-5 open fingers per hand, thumb/index/middle/ring/pinky)
+  |
+finger_tracker.py (debounce ~300-500ms against jitter)
+  |
+interaction.py (GESTURE_CONFIG -> position / scale / particles / animation,
+  |               EMA smoothing, two-hand distance/midpoint override)
+  |
+visual_engine.py (jellyfish + wireframe cube + particles, glow composite)
+```
+
+Finger extension uses a simple, orientation-independent rule: a finger is
+"open" when its tip sits farther from the wrist than its middle joint does.
+This holds up under mirroring, tilting, and rotation, which matters because a
+webcam rarely gets a perfectly upright hand.
 
 ## Requirements
 
@@ -44,7 +102,7 @@ brackets, a scanning ring, glowing fingertips, and lightweight particles.
 ## Installation
 
 ```bash
-cd ~/Projects/gesture-xray
+cd ~/Projects/interactive-vfx
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -56,7 +114,7 @@ pip install -r requirements.txt
 ./scripts/download_model.sh
 ```
 
-### Dependencies
+### Dependency compatibility
 
 Pinned to a combination verified to install without conflicts **and** run
 correctly on macOS + Apple Silicon + Python 3.12:
@@ -67,16 +125,22 @@ mediapipe==0.10.21
 numpy==1.26.4
 ```
 
-`mediapipe==0.10.21` requires `numpy<2`; do not upgrade NumPy to 2.x, and
-do not upgrade MediaPipe past this pin without re-testing — a newer release
-(1.0.1, at time of writing) crashes on macOS with a Metal/GPU-related
-`Service is unavailable` error regardless of CPU delegate settings.
+`mediapipe==0.10.21` requires `numpy<2` — do not upgrade NumPy to 2.x. Do not
+upgrade MediaPipe past this pin without re-testing: a newer release (1.0.1,
+at time of writing) crashes on macOS with a Metal/GPU-related `Service is
+unavailable` error regardless of CPU delegate settings.
+
+Verify after installing:
+
+```bash
+python -c "import numpy, cv2, mediapipe; print('NumPy:', numpy.__version__); print('OpenCV:', cv2.__version__); print('MediaPipe:', mediapipe.__version__)"
+```
 
 ## Running
 
 ```bash
-cd ~/Projects/gesture-xray
-source .venv/bin/activate
+python -m pip install -r requirements.txt
+pytest -q
 python main.py
 ```
 
@@ -84,17 +148,67 @@ Optional flags:
 
 ```bash
 python main.py --camera 1        # use a different camera device
-python main.py --hold-ms 500     # longer debounce hold (300-500ms typical)
+python main.py --hold-ms 500     # longer gesture debounce hold (300-500ms typical)
 ```
 
-## macOS camera permission
+## Gesture controls
 
-The first run prompts macOS for camera access. If the camera fails to open,
-AURA prints:
+Each hand's currently held (debounced) finger count maps to a control
+channel via `GESTURE_CONFIG` in `src/interaction.py`:
+
+```python
+GESTURE_CONFIG = {
+    "one_finger": "position",
+    "two_fingers": "scale",
+    "three_fingers": "particles",
+    "four_fingers": "animation",
+    "five_fingers": "activate",
+    "fist": "pause",
+}
+```
+
+| Gesture | Effect |
+|---|---|
+| ☝️ One finger | That hand's index-tip position drives the jellyfish/cube position |
+| ✌️ Two fingers | That hand's thumb<->index (pinch) distance drives scale |
+| 🤟 Three fingers | Drives particle emission intensity |
+| 🖐️✳️ Four fingers | Drives jellyfish/cube animation intensity |
+| ✋ Open hand, held ~600ms | Activates the system (same as SPACE) |
+| ✊ Closed fist, held ~600ms | Pauses the system (same as SPACE) |
+| 🤏 Pinch (thumb touches index) | Detected as a modifier flag alongside the finger count |
+| 🙌 Two hands | Overrides single-hand position/scale: the midpoint and distance between both index fingers control the visual directly, plus draws a connecting line |
+
+Reassign any of these by editing the dict — nothing else needs to change.
+The finger-count-to-gesture-name mapping itself is separate
+(`_GESTURE_TO_CONFIG_KEY` in `interaction.py`) if you want to remap which
+finger count *name* feeds into `GESTURE_CONFIG`.
+
+## Finger controls
+
+Every hand reports (in `src/hand_detector.py`'s `HandReading`): all five
+fingertip positions, which of the five fingers are extended, a 0-5 finger
+count, palm center, bounding box, and a relative on-screen size used for
+depth estimation.
+
+## Keyboard controls
 
 ```text
-Camera permission required. Enable camera access for VS Code
-in System Settings > Privacy & Security > Camera.
+SPACE  = toggle ACTIVE / STANDBY
+ESC/Q  = quit
+```
+
+In `STANDBY`, the camera and hand tracking keep running exactly as before,
+but the jellyfish/cube render dimmed and small, and no new particles are
+emitted — switch back with SPACE or an open-hand gesture.
+
+## Camera permissions
+
+If the camera can't be opened, the app prints:
+
+```text
+Camera access is disabled.
+Enable camera permission for the application/VS Code in:
+  System Settings -> Privacy & Security -> Camera
 ```
 
 Steps to fix:
@@ -105,105 +219,93 @@ Steps to fix:
    change does not apply to an already-running process.
 4. Run `python main.py` again.
 
-## Gesture instructions
+## Performance
 
-Hold both hands up so MediaPipe can see them clearly, with your thumb and
-index finger extended (a loose "L" shape) on **each** hand:
+Target is 30-60 FPS. To stay there:
 
-```text
-LEFT  hand: thumb OPEN + index OPEN
-RIGHT hand: thumb OPEN + index OPEN
-```
+- MediaPipe runs on the CPU delegate (the GPU/Metal delegate crashes
+  headless on this stack — see the dependency note above) at video-mode,
+  single-frame-at-a-time inference.
+- Particles are hard-capped at `MAX_PARTICLES = 500`, regardless of
+  emission rate.
+- "Glow" is faked with a cheap `cv2.add` composite instead of a full-frame
+  Gaussian blur pass.
+- No frame is ever buffered, queued, or saved — every frame is processed and
+  discarded immediately, so memory use stays flat over an arbitrarily long
+  run.
+- The camera is always released via a context manager (`with cam, detector:`
+  in `main.py`), including on error paths, so a crash or Ctrl-C doesn't
+  leave the camera device locked.
 
-The gesture is valid only when **all six conditions** are true at once:
+## Privacy
 
-```python
-left_hand_detected  and left_thumb_open  and left_index_open
-and right_hand_detected and right_thumb_open and right_index_open
-```
-
-Two hands in frame is not enough by itself — each hand's identity comes from
-MediaPipe's handedness classifier, and each hand's thumb and index must
-individually be open. Hold the pose steady for the debounce window (~400ms)
-to see `GESTURE: VALID` and, if the system is `ACTIVE`, the particle/ring
-effect and the `GESTURE ACCEPTED` message.
-
-## Keyboard controls
-
-```text
-SPACE = toggle SYSTEM: ACTIVE / STANDBY
-Q     = quit
-```
-
-In `STANDBY`, hand tracking and the HUD status panels keep working, but the
-main visual effect (bright ring, particles, acceptance message) is
-suppressed even on a valid gesture. Switch back to `ACTIVE` with SPACE.
-
-## Architecture
-
-```text
-main.py                 application loop, input handling, state, rendering pipeline
-src/
-├── camera.py            camera init, frame capture (mirrored), cleanup, error handling
-├── hand_detector.py      MediaPipe HandLandmarker wrapper, handedness, thumb/index geometry
-├── gesture_detector.py   left/right validation, GESTURE_HOLD_MS debounce
-├── particles.py          capped, lifetime-based particle system
-├── hud.py                HUD primitives: panels, brackets, rings, crosshair, glow
-└── utils.py              FPS counter, drawing helpers, capture-save helper
-```
-
-```text
-Camera
-  |
-OpenCV (frame capture, mirroring, drawing)
-  |
-MediaPipe HandLandmarker
-  |
-Handedness Detection (Left / Right, from MediaPipe — not screen position)
-  |
-Finger Detection (thumb + index open/closed, per hand)
-  |
-Gesture Validation (both hands present AND both fingers open, per hand)
-  |
-Debounce (400ms hold before the state flips)
-  |
-HUD + Particle Rendering
-```
-
-`thumb_open` / `index_open` use a simple, orientation-independent rule: a
-finger is "open" when its tip sits farther from the wrist than its middle
-joint does. This holds up under mirroring, tilting, and rotation, which
-matters because a webcam rarely gets a perfectly upright hand.
-
-## Testing
-
-```bash
-source .venv/bin/activate
-pytest -q
-```
-
-Covers thumb/index open-closed detection, handedness independence from
-position, every valid/invalid two-hand gesture combination, the
-`len(hands) == 2` trap (two hands with closed fingers must stay invalid),
-gesture debounce timing, and the particle system's lifetime/cap behaviour —
-all with synthetic landmarks, so no camera or model file is required to run
-the suite.
+All processing — camera capture, hand tracking, gesture logic, and
+rendering — runs locally on your Mac. There is no cloud API, no remote
+server, no telemetry, no analytics, and no external AI service call of any
+kind. The camera feed is read frame-by-frame and never written to disk or
+sent anywhere; the only network access this project ever makes is the
+one-time, explicit `scripts/download_model.sh` you run yourself during
+setup.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| Camera permission error | See [macOS camera permission](#macos-camera-permission) above. |
+| Camera permission error | See [Camera permissions](#camera-permissions) above. |
 | Model not found on startup | Run `./scripts/download_model.sh`. |
-| Hands not detected | Improve lighting; keep both hands fully in frame. |
-| Gesture flickers valid/invalid | Increase `--hold-ms` (default 400). |
+| Hands not detected | Improve lighting; keep the whole hand in frame. |
+| Finger count flickers | Increase `--hold-ms` (default 400). |
 | Wrong camera opens (e.g. iPhone) | Try `--camera 1`, or disable Continuity Camera on your iPhone. |
-| Low FPS | Close other apps using the camera or GPU; try a lower `--width`/`--height`. |
+| Low FPS | Close other apps using the camera/GPU; try `--width 960 --height 540`. |
+| Gesture ON/OFF triggers by accident | Increase `hold_ms` in `ActivationController` (`main.py`'s construction of it) beyond 600ms. |
 
-## Privacy
+## Project structure
 
-All processing — camera capture, hand tracking, gesture logic, and HUD
-rendering — happens locally on your Mac. No frame, landmark, or image is
-ever sent to a server or cloud service, and the app makes no network
-requests while running (the HandLandmarker model is downloaded once, ahead
-of time, via `scripts/download_model.sh`).
+```text
+interactive-vfx/
+├── main.py
+├── requirements.txt
+├── README.md
+├── LICENSE
+├── .gitignore
+├── assets/
+├── captures/
+├── src/
+│   ├── __init__.py
+│   ├── camera.py
+│   ├── hand_detector.py
+│   ├── gesture_detector.py
+│   ├── finger_tracker.py
+│   ├── visual_engine.py
+│   ├── jellyfish.py
+│   ├── particles.py
+│   ├── wireframe_cube.py
+│   ├── interaction.py
+│   └── utils.py
+└── tests/
+    ├── __init__.py
+    ├── test_detector.py
+    └── test_gestures.py
+```
+
+## Roadmap
+
+Working v1 ships with plain OpenCV 2D drawing doing all of the "3D" and
+glow work by hand (manual rotation/projection matrices, additive-blend
+glow). It's real, it's runnable, and it holds 30-60 FPS on Apple Silicon —
+but there's real room to grow:
+
+- Swap the hand-rolled cube projection / glow compositing for a proper
+  renderer (e.g. `moderngl`, `pyglet`, or a native OpenGL/Metal context) for
+  true depth-tested 3D, bloom, and anti-aliasing.
+- TouchDesigner bridge: stream `InteractionState` (position, scale,
+  particle/animation intensity, two-hand data) over OSC or a local socket so
+  the same hand tracking can drive a TouchDesigner patch instead of the
+  built-in Python renderer — `src/interaction.py`'s `InteractionState` is
+  already a clean, serializable hand-off point for this.
+- Smarter pinch-based scale that also accounts for finger curl, not just
+  thumb-index distance.
+- Multi-jellyfish or multi-cube scenes, one per detected hand.
+- A proper depth model (e.g. stereo or ML-based) instead of the relative
+  bounding-box-size heuristic, which is explicitly an approximation, not a
+  physical distance measurement.
