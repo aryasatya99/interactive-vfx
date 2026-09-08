@@ -176,3 +176,24 @@ def test_debounce_ignores_brief_flicker() -> None:
     assert d.update(True, now_ms=150) is False        # pending restarted here
     assert d.update(True, now_ms=400) is False        # only 250ms since restart
     assert d.update(True, now_ms=560) is True
+
+
+# --- Particle system -----------------------------------------------------
+
+from src.particles import MAX_PARTICLES, ParticleSystem  # noqa: E402
+
+
+def test_particle_emit_and_lifetime() -> None:
+    system = ParticleSystem()
+    system.emit(100, 100, (0, 255, 0), count=5)
+    assert len(system) == 5
+    for _ in range(50):  # advance well past any particle's max lifetime
+        system.update(dt=0.1)
+    assert len(system) == 0  # all particles must expire on their own
+
+
+def test_particle_count_is_capped() -> None:
+    system = ParticleSystem()
+    for _ in range(50):
+        system.emit(0, 0, (255, 255, 255), count=10)
+    assert len(system) <= MAX_PARTICLES

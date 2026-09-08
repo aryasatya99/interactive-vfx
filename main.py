@@ -1,20 +1,17 @@
-"""Gesture X-Ray - realtime two-hand gesture gate for a static X-ray image.
+"""AURA — AI Gesture Interface v1.
 
-DISCLAIMER
-    The webcam captures visible light only; it never produces an X-ray image
-    itself. `assets/xray.jpg` is a static asset you supply (a photo of an
-    X-ray print/film, or any image you choose). This program is an
-    educational computer-vision + gesture-control demo. It is NOT a medical
-    device and makes NO diagnostic claims of any kind.
+A futuristic gesture-control HUD: raise both hands with thumb + index open
+on each, and AURA activates its visual effects. Everything — camera capture,
+hand tracking, gesture logic, and rendering — runs locally; no frame ever
+leaves this machine and no network access is required at runtime.
 
 Pipeline
     Camera -> OpenCV -> MediaPipe HandLandmarker -> handedness (Left/Right)
     -> per-hand thumb/index open state -> two-hand gesture validation
-    -> debounce -> X-ray display gate.
+    -> debounce -> HUD + particle rendering.
 
 Controls
-    SPACE  capture the current camera frame into captures/
-    R      reload assets/xray.jpg from disk
+    SPACE  toggle SYSTEM: ACTIVE / STANDBY
     Q/ESC  quit
 """
 
@@ -28,174 +25,95 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from src import hud
 from src.camera import Camera, CameraError
-from src.gesture_detector import GestureDebouncer, GestureSnapshot, HandStatus, evaluate
+from src.gesture_detector import GestureDebouncer, evaluate
 from src.hand_detector import HandDetector, HandReading, ModelNotFoundError
-from src.utils import (
-    COLOR_ACCENT,
-    COLOR_BAD,
-    COLOR_BG,
-    COLOR_MUTED,
-    COLOR_OK,
-    COLOR_PANEL,
-    COLOR_TEXT,
-    COLOR_WARN,
-    FPSCounter,
-    fit_into,
-    put_text,
-    save_capture,
-    text_width,
-)
-from src.xray_display import XRayImage
+from src.particles import ParticleSystem
+from src.utils import FPSCounter, put_text, text_width
 
 ROOT = Path(__file__).parent
-WINDOW = "Gesture X-Ray"
+WINDOW = "AURA - AI Gesture Interface"
 CAPTURE_DIR = ROOT / "captures"
 DEFAULT_MODEL = ROOT / "models" / "hand_landmarker.task"
-DEFAULT_XRAY = ROOT / "assets" / "xray.jpg"
 
-# --- UI geometry ------------------------------------------------------------
-W = 1280
-MARGIN = 14
-GAP = 14
-HEADER_H = 52
-PANEL_H = 468
-HANDS_H = 64
-STATUS_H = 96
-FOOTER_H = 34
-PANEL_W = (W - 2 * MARGIN - GAP) // 2
-H = (HEADER_H + GAP + PANEL_H + GAP + HANDS_H + GAP
-     + STATUS_H + GAP + FOOTER_H + MARGIN)
-
-HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),          # thumb
-    (0, 5), (5, 6), (6, 7), (7, 8),          # index
-    (5, 9), (9, 10), (10, 11), (11, 12),     # middle
-    (9, 13), (13, 14), (14, 15), (15, 16),   # ring
-    (13, 17), (17, 18), (18, 19), (19, 20),  # pinky
-    (0, 17),                                 # palm base
-]
+HAND_COLORS = {"Left": hud.CYAN, "Right": hud.GREEN}
+ACCEPT_TOAST_FRAMES = 45
+PARTICLES_PER_TIP_PER_FRAME = 2
 
 
-def draw_landmarks(frame: np.ndarray, readings: list[HandReading]) -> np.ndarray:
-    view = frame.copy()
+def draw_title(frame: np.ndarray, w: int) -> None:
+    title = "AURA"
+    subtitle = "AI GESTURE INTERFACE"
+    tx = (w - text_width(title, 1.1, 3)) // 2
+    put_text(frame, title, (tx, 46), 1.1, hud.CYAN, 3)
+    sx = (w - text_width(subtitle, 0.5, 1)) // 2
+    put_text(frame, subtitle, (sx, 68), 0.5, hud.WHITE, 1)
+
+
+def draw_system_badge(frame: np.ndarray, w: int, active: bool) -> None:
+    label = "SYSTEM: ACTIVE" if active else "SYSTEM: STANDBY"
+    color = hud.GREEN if active else hud.AMBER
+    tw = text_width(label, 0.55, 2)
+    x, y = w - tw - 34, 20
+    hud.draw_panel(frame, x - 10, y - 20, tw + 20, 32, alpha=0.5, border_color=color)
+    put_text(frame, label, (x, y + 2), 0.55, color, 2)
+
+
+def draw_hand_panel(frame: np.ndarray, x: int, y: int, w: int, h: int,
+                    name: str, status, color: tuple[int, int, int]) -> None:
+    hud.draw_panel(frame, x, y, w, h, alpha=0.5, border_color=color)
+    put_text(frame, name, (x + 12, y + 22), 0.5, hud.WHITE, 2)
+    hud.status_row(frame, x + 12, y + 46, "HAND", status.detected)
+    hud.status_row(frame, x + 12, y + 68, "THUMB", status.thumb_open)
+    hud.status_row(frame, x + 12, y + 90, "INDEX", status.index_open)
+
+
+def draw_bottom_bar(frame: np.ndarray, w: int, h: int, gesture_open: bool,
+                    system_active: bool, fps: float, hand_count: int) -> None:
+    bar_h = 40
+    y = h - bar_h
+    hud.draw_panel(frame, 0, y, w, bar_h, alpha=0.55, border_color=hud.CYAN_DIM)
+    x = 18
+    x = hud.status_row(frame, x, y + 26, "GESTURE:", gesture_open, "VALID", "WAITING")
+    put_text(frame, "SYSTEM:", (x, y + 26), 0.5, hud.WHITE, 1)
+    x += text_width("SYSTEM:", 0.5, 1) + 10
+    put_text(frame, "ACTIVE" if system_active else "STANDBY", (x, y + 26), 0.5,
+             hud.GREEN if system_active else hud.AMBER, 2)
+    x += text_width("ACTIVE", 0.5, 2) + 30
+    put_text(frame, f"HANDS: {hand_count}", (x, y + 26), 0.5, hud.WHITE, 1)
+    x += text_width(f"HANDS: {hand_count}", 0.5, 1) + 30
+    put_text(frame, f"FPS: {fps:4.1f}", (x, y + 26), 0.5, hud.WHITE, 1)
+
+    hint = "SPACE = ACTIVE/STANDBY    Q = QUIT"
+    put_text(frame, hint, (w - text_width(hint, 0.42, 1) - 16, y + 26), 0.42, hud.WHITE, 1)
+
+
+def draw_accept_toast(frame: np.ndarray, w: int) -> None:
+    msg = "GESTURE ACCEPTED"
+    tx = (w - text_width(msg, 0.7, 2)) // 2
+    put_text(frame, msg, (tx, 100), 0.7, hud.GREEN, 2)
+
+
+def fingertip_positions(readings: list[HandReading]) -> list[tuple[int, int, tuple[int, int, int]]]:
+    """(x, y, color) for each hand's thumb tip and index tip — particle sources."""
+    points = []
     for r in readings:
-        color = COLOR_ACCENT if r.is_left else COLOR_OK
-        for a, b in HAND_CONNECTIONS:
-            cv2.line(view, r.landmarks_px[a], r.landmarks_px[b], color, 2, cv2.LINE_AA)
-        for x, y in r.landmarks_px:
-            cv2.circle(view, (x, y), 3, COLOR_TEXT, -1, cv2.LINE_AA)
-        wx, wy = r.landmarks_px[0]
-        put_text(view, r.label.upper(), (wx - 20, wy + 24), 0.5, color, 2)
-    return view
-
-
-def xray_panel(xray: XRayImage, gesture_open: bool, panel_w: int, panel_h: int) -> np.ndarray:
-    if not xray.available:
-        canvas = fit_into(None, panel_w, panel_h)
-        msg = "X-RAY IMAGE NOT FOUND"
-        put_text(canvas, msg, ((panel_w - text_width(msg, 0.6, 2)) // 2, panel_h // 2),
-                 0.6, COLOR_WARN, 2)
-        hint = "letakkan file di assets/xray.jpg lalu tekan R"
-        put_text(canvas, hint, ((panel_w - text_width(hint, 0.45, 1)) // 2, panel_h // 2 + 28),
-                 0.45, COLOR_MUTED, 1)
-        return canvas
-    if not gesture_open:
-        canvas = fit_into(None, panel_w, panel_h)
-        msg = "LOCKED"
-        put_text(canvas, msg, ((panel_w - text_width(msg, 1.0, 2)) // 2, panel_h // 2),
-                 1.0, COLOR_MUTED, 2)
-        return canvas
-    return fit_into(xray.image, panel_w, panel_h)
-
-
-def compose_ui(
-    camera_view: np.ndarray,
-    xray_view: np.ndarray,
-    snap: GestureSnapshot,
-    xray_open: bool,
-    xray_available: bool,
-    fps: float,
-    toast: str | None,
-) -> np.ndarray:
-    ui = np.full((H, W, 3), COLOR_BG, dtype=np.uint8)
-
-    # Header
-    cv2.rectangle(ui, (0, 0), (W, HEADER_H), COLOR_PANEL, -1)
-    title = "GESTURE X-RAY"
-    put_text(ui, title, ((W - text_width(title, 0.85, 2)) // 2, 34), 0.85, COLOR_TEXT, 2)
-    put_text(ui, "educational demo - not a medical device", (MARGIN, 34), 0.42, COLOR_MUTED, 1)
-
-    # Camera / X-ray panels
-    top = HEADER_H + GAP
-    lx, rx = MARGIN, MARGIN + PANEL_W + GAP
-    ui[top:top + PANEL_H, lx:lx + PANEL_W] = fit_into(camera_view, PANEL_W, PANEL_H)
-    ui[top:top + PANEL_H, rx:rx + PANEL_W] = fit_into(xray_view, PANEL_W, PANEL_H)
-    for x, label in ((lx, "CAMERA"), (rx, "X-RAY")):
-        cv2.rectangle(ui, (x, top), (x + PANEL_W, top + PANEL_H), (70, 66, 62), 1)
-        cv2.rectangle(ui, (x, top), (x + 140, top + 24), COLOR_PANEL, -1)
-        put_text(ui, label, (x + 10, top + 17), 0.48, COLOR_ACCENT, 1)
-
-    # Hand status row
-    hy = top + PANEL_H + GAP
-    cv2.rectangle(ui, (MARGIN, hy), (W - MARGIN, hy + HANDS_H), COLOR_PANEL, -1)
-
-    def draw_hand_row(y: int, name: str, status: HandStatus) -> None:
-        x = MARGIN + 18
-        put_text(ui, name, (x, y), 0.55, COLOR_TEXT, 2)
-        x += text_width(name, 0.55, 2) + 14
-        mark, color = ("✓", COLOR_OK) if status.detected else ("✗", COLOR_BAD)
-        put_text(ui, mark, (x, y), 0.55, color, 2)
-        x += 40
-        for label, ok in (("Thumb", status.thumb_open), ("Index", status.index_open)):
-            mark, color = ("✓", COLOR_OK) if ok else ("✗", COLOR_BAD)
-            put_text(ui, f"{label}", (x, y), 0.5, COLOR_MUTED, 1)
-            x += text_width(label, 0.5, 1) + 8
-            put_text(ui, mark, (x, y), 0.5, color, 2)
-            x += 46
-
-    draw_hand_row(hy + 26, "LEFT HAND", snap.left)
-    draw_hand_row(hy + 52, "RIGHT HAND", snap.right)
-
-    # Status block
-    sy = hy + HANDS_H + GAP
-    cv2.rectangle(ui, (MARGIN, sy), (W - MARGIN, sy + STATUS_H), COLOR_PANEL, -1)
-    gesture_color = COLOR_OK if snap.valid else COLOR_WARN
-    xray_label, xray_color = (
-        ("OPEN", COLOR_OK) if xray_open else
-        ("LOCKED", COLOR_WARN) if xray_available else
-        ("UNAVAILABLE", COLOR_BAD)
-    )
-    lines = [
-        ("GESTURE:", "VALID" if snap.valid else "INVALID", gesture_color),
-        ("X-RAY:", xray_label, xray_color),
-        ("CAMERA:", "OK", COLOR_OK),
-        ("FPS:", f"{fps:4.1f}", COLOR_TEXT),
-    ]
-    for i, (name, value, color) in enumerate(lines):
-        y = sy + 22 + i * 20
-        put_text(ui, name, (MARGIN + 18, y), 0.5, COLOR_MUTED, 1)
-        put_text(ui, value, (MARGIN + 18 + text_width(name, 0.5, 1) + 10, y), 0.5, color, 2)
-
-    # Footer
-    fy = sy + STATUS_H + GAP
-    hint = "SPACE = CAPTURE    R = RELOAD X-RAY    Q = QUIT"
-    put_text(ui, hint, (MARGIN + 18, fy + 22), 0.48, COLOR_MUTED, 1)
-    if toast:
-        put_text(ui, toast, (W - MARGIN - 18 - text_width(toast, 0.48, 1), fy + 22),
-                 0.48, COLOR_OK, 1)
-    return ui
+        color = HAND_COLORS.get(r.label, hud.WHITE)
+        for idx in hud.TIP_INDICES:
+            x, y = r.landmarks_px[idx]
+            points.append((x, y, color))
+    return points
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Gesture X-Ray (educational)")
+    p = argparse.ArgumentParser(description="AURA - AI Gesture Interface (educational)")
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=720)
     p.add_argument("--model", type=Path, default=DEFAULT_MODEL)
-    p.add_argument("--xray", type=Path, default=DEFAULT_XRAY)
     p.add_argument("--hold-ms", type=int, default=400,
-                   help="debounce hold time in ms before gesture state flips")
+                   help="debounce hold time in ms before gesture state flips (300-500 typical)")
     return p.parse_args()
 
 
@@ -215,16 +133,21 @@ def main() -> int:
         detector.close()
         return 1
 
-    xray = XRayImage(args.xray)
     debouncer = GestureDebouncer(hold_ms=args.hold_ms)
+    particles = ParticleSystem()
     fps_counter = FPSCounter()
-    toast: str | None = None
+
+    system_active = True
+    prev_effect_active = False
     toast_frames = 0
+    scan_angle = 0.0
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
-    print(f"[INFO] kamera aktif @ {cam.resolution[0]}x{cam.resolution[1]}")
-    print("[INFO] SPACE = capture, R = reload x-ray, Q = quit")
+    print(f"[INFO] camera online @ {cam.resolution[0]}x{cam.resolution[1]}")
+    print("[INFO] SPACE = toggle ACTIVE/STANDBY, Q = quit")
+
     start = time.perf_counter()
+    prev_time = start
 
     with cam, detector:
         while True:
@@ -236,35 +159,65 @@ def main() -> int:
             if frame is None:
                 continue
 
-            timestamp_ms = int((time.perf_counter() - start) * 1000)
+            now = time.perf_counter()
+            dt = max(0.0, now - prev_time)
+            prev_time = now
+            timestamp_ms = int((now - start) * 1000)
+
             readings = detector.detect(frame, timestamp_ms)
             snap = evaluate(readings)
-            xray_open = debouncer.update(snap.valid, timestamp_ms)
+            gesture_open = debouncer.update(snap.valid, timestamp_ms)
+            effect_active = system_active and gesture_open
 
-            fps = fps_counter.tick()
+            if effect_active and not prev_effect_active:
+                toast_frames = ACCEPT_TOAST_FRAMES
+            prev_effect_active = effect_active
             if toast_frames > 0:
                 toast_frames -= 1
-            else:
-                toast = None
 
-            camera_view = draw_landmarks(frame, readings)
-            xr_view = xray_panel(xray, xray_open, PANEL_W, PANEL_H)
-            ui = compose_ui(camera_view, xr_view, snap, xray_open, xray.available,
-                            fps, toast)
-            cv2.imshow(WINDOW, ui)
+            fps = fps_counter.tick()
+            h, w = frame.shape[:2]
+
+            # --- particle emission (only when the main effect is active) ---
+            particles.update(dt)
+            if effect_active:
+                for x, y, color in fingertip_positions(readings):
+                    particles.emit(x, y, color, PARTICLES_PER_TIP_PER_FRAME)
+
+            # --- glow layer: brackets, rings, hand skeletons -----------------
+            glow = hud.new_glow_layer(frame)
+            bottom_bar_h = 40
+            hud.draw_corner_brackets(glow, 10, 10, w - 20, h - bottom_bar_h - 20, size=34,
+                                     color=hud.GREEN if effect_active else hud.CYAN)
+            center = (w // 2, h // 2)
+            scan_angle = (scan_angle + dt * (140 if effect_active else 60)) % 360
+            hud.draw_scanning_ring(glow, center, 100, scan_angle,
+                                   hud.GREEN if effect_active else hud.CYAN,
+                                   active=effect_active)
+            for r in readings:
+                color = HAND_COLORS.get(r.label, hud.WHITE)
+                hud.draw_hand_skeleton(frame, glow, r.landmarks_px, r.label, color)
+
+            frame = hud.blend_glow(frame, glow, intensity=0.9 if effect_active else 0.7)
+            particles.render(frame)
+
+            # --- crisp overlays: title, panels, status text ------------------
+            draw_title(frame, w)
+            draw_system_badge(frame, w, system_active)
+            draw_hand_panel(frame, 16, h - 200, 230, 120, "LEFT HAND", snap.left, hud.CYAN)
+            draw_hand_panel(frame, w - 246, h - 200, 230, 120, "RIGHT HAND", snap.right, hud.GREEN)
+            draw_bottom_bar(frame, w, h, gesture_open, system_active, fps, len(readings))
+            if toast_frames > 0:
+                draw_accept_toast(frame, w)
+
+            cv2.imshow(WINDOW, frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
-            if key == ord("r"):
-                ok = xray.reload()
-                toast = "X-RAY RELOADED" if ok else "X-RAY IMAGE NOT FOUND"
-                toast_frames = 60
             if key == 32:  # SPACE
-                path = save_capture(frame, CAPTURE_DIR)
-                toast = f"SAVED {path.name}"
-                toast_frames = 60
-                print(f"[SAVE] {path}")
+                system_active = not system_active
+                print(f"[INFO] SYSTEM -> {'ACTIVE' if system_active else 'STANDBY'}")
 
             if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break

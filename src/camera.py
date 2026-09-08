@@ -31,9 +31,11 @@ class Camera:
         self._cap = cv2.VideoCapture(index, backend)
         if not self._cap.isOpened():
             raise CameraError(
-                f"Tidak bisa membuka kamera index {index}. "
-                "Cek System Settings > Privacy & Security > Camera, "
-                "atau coba index lain (--camera 1)."
+                "Camera permission required. Enable camera access for VS Code "
+                "in System Settings > Privacy & Security > Camera.\n"
+                f"(Tried camera index {index}. If permission is already "
+                "granted, another app may be holding the camera, or try "
+                "--camera 1 for a different device.)"
             )
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)

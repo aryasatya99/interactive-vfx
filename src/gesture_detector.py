@@ -64,9 +64,9 @@ def evaluate(readings: list[HandReading]) -> GestureSnapshot:
 
 class GestureDebouncer:
     """Only flips the reported gesture state after `hold_ms` of a steady raw
-    reading, in either direction. This is what stops the X-ray display from
-    flickering when a landmark jitters across the open/closed threshold for
-    a frame or two.
+    reading, in either direction. This is what stops the HUD/particle effects
+    from flickering when a landmark jitters across the open/closed threshold
+    for a frame or two.
     """
 
     def __init__(self, hold_ms: int = GESTURE_HOLD_MS) -> None:
